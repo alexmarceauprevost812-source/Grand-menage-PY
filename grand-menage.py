@@ -454,15 +454,24 @@ def liens_recherche(email, pseudo):
     return liens
 
 
+def ouvrir_prive(chemin):
+    """Ouvre un fichier en écriture, lisible par toi seul (0600 sous Linux) :
+    le rapport contient ton courriel, ton nom, tes fuites et tes comptes."""
+    fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if os.name != "nt":
+        os.fchmod(fd, 0o600)   # aussi pour un fichier qui existait déjà avec d'autres droits
+    return open(fd, "w", encoding="utf-8")
+
+
 def ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches):
-    os.makedirs(os.path.join(dossier, "lettres"), exist_ok=True)
+    os.makedirs(os.path.join(dossier, "lettres"), mode=0o700, exist_ok=True)
 
     # lettres : seulement pour les résultats forts ou moyens
     nb_lettres = 0
     for c in comptes:
         if c["confiance"] in ("forte", "moyenne"):
             chemin = os.path.join(dossier, "lettres", re.sub(r"[^\w.-]", "_", c["domaine"]) + ".txt")
-            with open(chemin, "w", encoding="utf-8") as f:
+            with ouvrir_prive(chemin) as f:
                 f.write(lettre_site(ctx.email, ctx.nom, c))
             nb_lettres += 1
 
@@ -502,7 +511,7 @@ def ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches):
     md += [f"- [{nom}]({url})" for nom, url in LIENS_NETTOYAGE]
 
     chemin_md = os.path.join(dossier, "RESULTAT_FINAL.md")
-    with open(chemin_md, "w", encoding="utf-8") as f:
+    with ouvrir_prive(chemin_md) as f:
         f.write("\n".join(md) + "\n")
 
     # JSON
@@ -515,7 +524,7 @@ def ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches):
                     "nb": len(r.trouves)} for r in ctx.resultats],
         "plan": plan,
     }
-    with open(os.path.join(dossier, "resultat.json"), "w", encoding="utf-8") as f:
+    with ouvrir_prive(os.path.join(dossier, "resultat.json")) as f:
         json.dump(donnees, f, ensure_ascii=False, indent=2)
 
     return chemin_md, nb_lettres
@@ -641,13 +650,13 @@ def confirmer_adresse(email):
 def nouveau_dossier(sortie):
     """Crée un dossier neuf par lancement : deux ménages en même temps ne se mélangent pas.
     os.mkdir échoue si le dossier existe déjà, ce qui le réserve sans course entre deux lancements."""
-    os.makedirs(sortie, exist_ok=True)
+    os.makedirs(sortie, mode=0o700, exist_ok=True)
     base = os.path.join(sortie, datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
     n = 1
     while True:
         dossier = base if n == 1 else f"{base}-{n}"
         try:
-            os.mkdir(dossier)
+            os.mkdir(dossier, 0o700)
             return dossier
         except FileExistsError:
             n += 1
@@ -655,6 +664,12 @@ def nouveau_dossier(sortie):
 
 def faire_le_menage(ctx, outils, sortie):
     """Lance les outils un par un, fusionne, écrit les fichiers et affiche le résultat final."""
+    try:   # avant les outils : si le dossier est impossible à créer, on le sait tout de suite
+        dossier = nouveau_dossier(sortie)
+    except OSError as e:
+        print(f"  Impossible de créer le dossier des résultats dans {sortie} ({e}).")
+        print("  Choisis un autre dossier avec --sortie. Aucun outil n'a été lancé.")
+        return None
     ctx.resultats = []
     executer(outils, ctx)
     comptes = consolider(ctx.resultats)
@@ -662,7 +677,6 @@ def faire_le_menage(ctx, outils, sortie):
     archives = trouves_de(ctx.resultats, "archives")
     plan = plan_action(comptes, fuites, archives)
     recherches = liens_recherche(ctx.email, ctx.pseudo)
-    dossier = nouveau_dossier(sortie)
     _, nb_lettres = ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches)
     afficher_resultat_final(ctx, comptes, fuites, archives, plan, dossier, nb_lettres)
     return dossier
@@ -679,8 +693,8 @@ def charger_config(sortie):
 
 def sauver_config(sortie, ctx):
     try:
-        os.makedirs(sortie, exist_ok=True)
-        with open(os.path.join(sortie, "config.json"), "w", encoding="utf-8") as f:
+        os.makedirs(sortie, mode=0o700, exist_ok=True)
+        with ouvrir_prive(os.path.join(sortie, "config.json")) as f:
             json.dump({"email": ctx.email, "pseudo": ctx.pseudo, "nom": ctx.nom},
                       f, ensure_ascii=False, indent=2)
     except OSError:
@@ -926,7 +940,8 @@ def main():
                 sys.exit("  Outil réservé à tes propres adresses. Arrêt.")
             ctx.email = a.email
             ctx.pseudo = a.pseudo or a.email.split("@")[0]
-            faire_le_menage(ctx, outils, a.sortie)
+            if faire_le_menage(ctx, outils, a.sortie) is None:
+                sys.exit(1)
             if a.ouvrir:
                 recherches = liens_recherche(ctx.email, ctx.pseudo)
                 for nom, url in recherches + LIENS_NETTOYAGE:
