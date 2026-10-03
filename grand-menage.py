@@ -234,8 +234,10 @@ def outil_gravatar(ctx, res):
         res.statut, res.note = "erreur", f"service injoignable ({e})"
 
 
-def _externe(res, programme, indice, commande, repli, analyseur, timeout=900):
-    """Façon commune de lancer un outil externe (Kali ou Windows) et de lire son résultat."""
+def _externe(res, programme, indice, commande, repli, analyseur, timeout=900, preuve=None):
+    """Façon commune de lancer un outil externe (Kali ou Windows) et de lire son résultat.
+    `preuve` : texte que l'outil affiche toujours à la fin d'une vraie recherche. S'il manque,
+    l'outil s'est arrêté avant (ex. holehe qui se met à jour puis quitte) : on relance une fois."""
     chemin = shutil.which(programme)
     if not chemin:
         res.statut, res.note = "absent", f"non installé ({indice})"
@@ -244,10 +246,20 @@ def _externe(res, programme, indice, commande, repli, analyseur, timeout=900):
     repli = [chemin] + repli[1:] if repli else None
     print("  (patience, ça peut prendre plusieurs minutes...)")
     retour = lancer(commande, timeout=timeout, repli=repli)
+    if retour is not None and preuve and preuve not in retour[1]:
+        print("  (l'outil s'est arrêté avant de chercher, nouvel essai...)")
+        retour = lancer(commande, timeout=timeout, repli=repli)
     if retour is None:
         res.statut, res.note = "erreur", "délai dépassé"
         return
     code, sortie = retour
+    if preuve and preuve not in sortie:
+        lignes = [l.strip() for l in sortie.splitlines() if l.strip()]
+        res.statut = "erreur"
+        res.note = "la recherche n'a pas eu lieu" + (f" : {lignes[-1][:150]}" if lignes else "")
+        if programme == "holehe":
+            res.note += " (mets holehe à jour : pipx upgrade holehe, ou py -m pip install -U holehe)"
+        return
     res.trouves = analyseur(sortie)
     if code != 0 and not res.trouves:   # l'outil a planté : ne pas faire croire que tout est propre
         lignes = [l.strip() for l in sortie.splitlines() if l.strip()]
@@ -275,7 +287,8 @@ def analyser_profils(sortie):
 
 def outil_holehe(ctx, res):
     _externe(res, "holehe", INSTALLER,
-             ["holehe", "--only-used", "--no-color", ctx.email], None, analyser_holehe, 600)
+             ["holehe", "--only-used", "--no-color", ctx.email], None, analyser_holehe, 600,
+             preuve="websites checked")
 
 
 def outil_sherlock(ctx, res):
@@ -454,13 +467,21 @@ def liens_recherche(email, pseudo):
     return liens
 
 
-def ouvrir_prive(chemin):
-    """Ouvre un fichier en écriture, lisible par toi seul (0600 sous Linux) :
-    le rapport contient ton courriel, ton nom, tes fuites et tes comptes."""
-    fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    if os.name != "nt":
-        os.fchmod(fd, 0o600)   # aussi pour un fichier qui existait déjà avec d'autres droits
-    return open(fd, "w", encoding="utf-8")
+def ecrire_prive(chemin, texte):
+    """Écrit un fichier lisible par toi seul (0600 sous Linux) : le rapport contient ton courriel,
+    ton nom, tes fuites et tes comptes. On écrit dans un fichier temporaire neuf puis on le met
+    à la place : si `chemin` est un lien symbolique, c'est le lien qui est remplacé, jamais sa cible."""
+    fd, temporaire = tempfile.mkstemp(dir=os.path.dirname(chemin) or ".", prefix=".grand-menage-")
+    try:
+        with open(fd, "w", encoding="utf-8") as f:
+            f.write(texte)
+        os.replace(temporaire, chemin)
+    except BaseException:
+        try:
+            os.unlink(temporaire)
+        except OSError:
+            pass
+        raise
 
 
 def ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches):
@@ -471,8 +492,7 @@ def ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches):
     for c in comptes:
         if c["confiance"] in ("forte", "moyenne"):
             chemin = os.path.join(dossier, "lettres", re.sub(r"[^\w.-]", "_", c["domaine"]) + ".txt")
-            with ouvrir_prive(chemin) as f:
-                f.write(lettre_site(ctx.email, ctx.nom, c))
+            ecrire_prive(chemin, lettre_site(ctx.email, ctx.nom, c))
             nb_lettres += 1
 
     # rapport Markdown
@@ -511,8 +531,7 @@ def ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches):
     md += [f"- [{nom}]({url})" for nom, url in LIENS_NETTOYAGE]
 
     chemin_md = os.path.join(dossier, "RESULTAT_FINAL.md")
-    with ouvrir_prive(chemin_md) as f:
-        f.write("\n".join(md) + "\n")
+    ecrire_prive(chemin_md, "\n".join(md) + "\n")
 
     # JSON
     donnees = {
@@ -524,8 +543,7 @@ def ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches):
                     "nb": len(r.trouves)} for r in ctx.resultats],
         "plan": plan,
     }
-    with ouvrir_prive(os.path.join(dossier, "resultat.json")) as f:
-        json.dump(donnees, f, ensure_ascii=False, indent=2)
+    ecrire_prive(os.path.join(dossier, "resultat.json"), json.dumps(donnees, ensure_ascii=False, indent=2))
 
     return chemin_md, nb_lettres
 
@@ -692,13 +710,15 @@ def charger_config(sortie):
 
 
 def sauver_config(sortie, ctx):
+    """Retourne None si c'est enregistré, sinon le message d'erreur."""
     try:
         os.makedirs(sortie, mode=0o700, exist_ok=True)
-        with ouvrir_prive(os.path.join(sortie, "config.json")) as f:
-            json.dump({"email": ctx.email, "pseudo": ctx.pseudo, "nom": ctx.nom},
-                      f, ensure_ascii=False, indent=2)
-    except OSError:
-        pass
+        ecrire_prive(os.path.join(sortie, "config.json"),
+                     json.dumps({"email": ctx.email, "pseudo": ctx.pseudo, "nom": ctx.nom},
+                                ensure_ascii=False, indent=2))
+    except OSError as e:
+        return str(e)
+    return None
 
 
 # ---------------------------------------------------------------- le menu
@@ -722,8 +742,11 @@ def regler_identite(ctx, sortie):
     nom_actuel = "" if ctx.nom == "[Ton nom]" else ctx.nom
     ctx.nom = saisir("Ton nom (pour les lettres)", nom_actuel) or "[Ton nom]"
     ctx.email = email
-    sauver_config(sortie, ctx)
-    print("  Réglages enregistrés.")
+    erreur = sauver_config(sortie, ctx)
+    if erreur:
+        print(f"  Réglages gardés pour cette session seulement : impossible d'écrire dans {sortie} ({erreur}).")
+    else:
+        print("  Réglages enregistrés.")
 
 
 def choisir_outils(outils):
@@ -906,6 +929,16 @@ def menu(ctx, sortie, outils_base, sans_effacer):
 
 
 # ====================================================================== programme principal
+def entier_positif(texte):
+    try:
+        n = int(texte)
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"doit être un nombre entier positif ou zéro (reçu : {texte})")
+    return n
+
+
 def main():
     preparer_terminal()
     p = argparse.ArgumentParser(description="Grand Ménage : lance tous les outils de traces web, un par un, "
@@ -917,7 +950,8 @@ def main():
                    help="dossier des résultats (défaut : ~/grand-menage)")
     p.add_argument("--sauter", default="",
                    help="outils à sauter, séparés par des virgules (" + ",".join(o[0] for o in OUTILS) + ")")
-    p.add_argument("--max-archives", type=int, default=15, help="nombre max de profils vérifiés dans Wayback")
+    p.add_argument("--max-archives", type=entier_positif, default=15,
+                   help="nombre max de profils vérifiés dans Wayback (0 = aucun)")
     p.add_argument("--oui", action="store_true", help="sauter la confirmation « c'est mon adresse »")
     p.add_argument("--sans-effacer", action="store_true", help="ne pas effacer l'écran au démarrage")
     p.add_argument("--ouvrir", action="store_true", help="ouvrir les liens de recherche dans le navigateur")
