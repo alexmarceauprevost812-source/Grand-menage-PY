@@ -702,11 +702,15 @@ def faire_le_menage(ctx, outils, sortie):
 
 # ---------------------------------------------------------------- réglages mémorisés
 def charger_config(sortie):
+    """Réglages mémorisés. Un fichier abîmé ou inattendu est ignoré : on ne garde que les textes."""
     try:
         with open(os.path.join(sortie, "config.json"), encoding="utf-8") as f:
-            return json.load(f)
+            cfg = json.load(f)
     except (OSError, ValueError):
         return {}
+    if not isinstance(cfg, dict):
+        return {}
+    return {k: v for k, v in cfg.items() if k in ("email", "pseudo", "nom") and isinstance(v, str)}
 
 
 def sauver_config(sortie, ctx):
