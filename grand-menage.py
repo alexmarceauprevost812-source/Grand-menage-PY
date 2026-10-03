@@ -155,19 +155,19 @@ def sans_couleurs(texte):
 
 def lancer(commande, timeout=900, repli=None):
     """Lance une commande dans un dossier temporaire (pour ne pas semer de fichiers).
-    Retourne sa sortie texte, ou None si le délai est dépassé.
+    Retourne (code de retour, sortie texte), ou None si le délai est dépassé.
     Si une option n'existe pas dans ta version de l'outil, on réessaie avec `repli`."""
     def une_fois(cmd):
         with tempfile.TemporaryDirectory() as dossier:
             env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
             r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                                errors="replace", timeout=timeout, cwd=dossier, env=env)
-            return sans_couleurs((r.stdout or "") + (r.stderr or ""))
+            return r.returncode, sans_couleurs((r.stdout or "") + (r.stderr or ""))
     try:
-        sortie = une_fois(commande)
+        code, sortie = une_fois(commande)
         if repli and "unrecognized arguments" in sortie:
-            sortie = une_fois(repli)
-        return sortie
+            code, sortie = une_fois(repli)
+        return code, sortie
     except subprocess.TimeoutExpired:
         return None
 
@@ -180,8 +180,16 @@ def domaine_de(texte):
     return texte[4:] if texte.startswith("www.") else texte
 
 
+SUFFIXES_DEUX_NIVEAUX = {"co", "com", "net", "org", "gov", "gouv", "edu", "ac", "or", "ne", "go",
+                         "nom", "ltd", "plc", "sch", "mil", "qc", "on", "bc", "ab"}
+
+
 def racine(domaine):
-    return ".".join(domaine.split(".")[-2:])
+    """'mail.google.com' -> 'google.com' ; 'www.bbc.co.uk' -> 'bbc.co.uk' (pas 'co.uk')"""
+    morceaux = domaine.split(".")
+    if len(morceaux) >= 3 and len(morceaux[-1]) == 2 and morceaux[-2] in SUFFIXES_DEUX_NIVEAUX:
+        return ".".join(morceaux[-3:])
+    return ".".join(morceaux[-2:])
 
 
 # ====================================================================== les outils
@@ -231,12 +239,20 @@ def _externe(res, programme, indice, commande, repli, analyseur, timeout=900):
     commande = [chemin] + commande[1:]           # chemin complet : marche aussi avec les .exe de Windows
     repli = [chemin] + repli[1:] if repli else None
     print("  (patience, ça peut prendre plusieurs minutes...)")
-    sortie = lancer(commande, timeout=timeout, repli=repli)
-    if sortie is None:
+    retour = lancer(commande, timeout=timeout, repli=repli)
+    if retour is None:
         res.statut, res.note = "erreur", "délai dépassé"
         return
+    code, sortie = retour
     res.trouves = analyseur(sortie)
+    if code != 0 and not res.trouves:   # l'outil a planté : ne pas faire croire que tout est propre
+        lignes = [l.strip() for l in sortie.splitlines() if l.strip()]
+        res.statut = "erreur"
+        res.note = f"échec (code {code})" + (f" : {lignes[-1][:150]}" if lignes else "")
+        return
     res.statut = "ok"
+    if code != 0:
+        res.note = f"terminé avec le code {code} : résultats peut-être incomplets"
 
 
 def analyser_holehe(sortie):
@@ -618,6 +634,16 @@ def confirmer_adresse(email):
     return rep.strip().lower() in ("oui", "o", "yes", "y")
 
 
+def nouveau_dossier(sortie):
+    """Un dossier neuf par lancement : deux ménages la même minute ne se mélangent pas."""
+    base = os.path.join(sortie, datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+    dossier, n = base, 1
+    while os.path.exists(dossier):
+        n += 1
+        dossier = f"{base}-{n}"
+    return dossier
+
+
 def faire_le_menage(ctx, outils, sortie):
     """Lance les outils un par un, fusionne, écrit les fichiers et affiche le résultat final."""
     ctx.resultats = []
@@ -627,7 +653,7 @@ def faire_le_menage(ctx, outils, sortie):
     archives = trouves_de(ctx.resultats, "archives")
     plan = plan_action(comptes, fuites, archives)
     recherches = liens_recherche(ctx.email, ctx.pseudo)
-    dossier = os.path.join(sortie, datetime.datetime.now().strftime("%Y%m%d_%H%M"))
+    dossier = nouveau_dossier(sortie)
     _, nb_lettres = ecrire_fichiers(dossier, ctx, comptes, fuites, archives, plan, recherches)
     afficher_resultat_final(ctx, comptes, fuites, archives, plan, dossier, nb_lettres)
     return dossier
@@ -696,7 +722,7 @@ def dernier_dossier(sortie, contenant=None):
     (un ménage interrompu peut laisser un dossier sans rapport)."""
     try:
         dossiers = sorted(d for d in os.listdir(sortie)
-                          if re.match(r"^\d{8}_\d{4}$", d) and os.path.isdir(os.path.join(sortie, d)))
+                          if re.match(r"^\d{8}_\d{4}(\d{2})?(-\d+)?$", d) and os.path.isdir(os.path.join(sortie, d)))
     except OSError:
         return None
     for d in reversed(dossiers):
@@ -749,12 +775,25 @@ def plan_installation(manquants):
         for prog in manquants:
             plan.append((prog, [sys.executable, "-m", "pip", "install", "--user", PAQUETS_PIP[prog]], None))
         return plan
+    pipx = ["pipx"]
     if not shutil.which("pipx"):
-        plan.append(("pipx", ["sudo", "apt", "install", "-y", "pipx"], None))
+        gestionnaires = [   # (commande à chercher, commande d'installation de pipx)
+            ("apt-get", ["sudo", "apt-get", "install", "-y", "pipx"]),
+            ("dnf", ["sudo", "dnf", "install", "-y", "pipx"]),
+            ("pacman", ["sudo", "pacman", "-S", "--noconfirm", "python-pipx"]),
+            ("zypper", ["sudo", "zypper", "install", "-y", "python3-pipx"]),
+            ("brew", ["brew", "install", "pipx"]),
+        ]
+        commande = next((c for g, c in gestionnaires if shutil.which(g)), None)
+        if commande:
+            plan.append(("pipx", commande, None))
+        else:   # aucun gestionnaire connu : pipx par pip, lancé ensuite par Python lui-même
+            plan.append(("pipx", [sys.executable, "-m", "pip", "install", "--user", "pipx"], None))
+            pipx = [sys.executable, "-m", "pipx"]
     for prog in manquants:
-        par_pipx = ["pipx", "install", PAQUETS_PIP[prog]]
+        par_pipx = pipx + ["install", PAQUETS_PIP[prog]]
         if est_kali() and prog in ("sherlock", "maigret"):
-            plan.append((prog, ["sudo", "apt", "install", "-y", prog], par_pipx))   # apt d'abord, pipx si ça échoue
+            plan.append((prog, ["sudo", "apt-get", "install", "-y", prog], par_pipx))   # apt d'abord, pipx si ça échoue
         else:
             plan.append((prog, par_pipx, None))
     return plan
