@@ -185,16 +185,20 @@ SUFFIXES_DEUX_NIVEAUX = {"co", "com", "net", "org", "gov", "gouv", "edu", "ac", 
 
 
 def racine(domaine):
-    """'mail.google.com' -> 'google.com' ; 'www.bbc.co.uk' -> 'bbc.co.uk' (pas 'co.uk')"""
+    """Domaine à qui écrire : 'mail.google.com' -> 'google.com' ; 'news.bbc.co.uk' -> 'bbc.co.uk'.
+    Sous un code pays (.uk, .au...), sans suffixe connu, on garde le domaine trouvé en entier :
+    mieux vaut une adresse un peu longue qu'une adresse qui vise un autre organisme."""
     morceaux = domaine.split(".")
-    if len(morceaux) >= 3 and len(morceaux[-1]) == 2 and morceaux[-2] in SUFFIXES_DEUX_NIVEAUX:
+    if len(morceaux) <= 2 or len(morceaux[-1]) > 2:   # .com, .org, .net... : les deux derniers suffisent
+        return ".".join(morceaux[-2:])
+    if morceaux[-2] in SUFFIXES_DEUX_NIVEAUX:
         return ".".join(morceaux[-3:])
-    return ".".join(morceaux[-2:])
+    return domaine
 
 
 # ====================================================================== les outils
 def outil_fuites(ctx, res):
-    url = "https://api.xposedornot.com/v1/check-email/" + urllib.parse.quote(ctx.email)
+    url = "https://api.xposedornot.com/v1/check-email/" + urllib.parse.quote(ctx.email, safe="")
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=20) as rep:
             data = json.load(rep)
@@ -635,13 +639,18 @@ def confirmer_adresse(email):
 
 
 def nouveau_dossier(sortie):
-    """Un dossier neuf par lancement : deux ménages la même minute ne se mélangent pas."""
+    """Crée un dossier neuf par lancement : deux ménages en même temps ne se mélangent pas.
+    os.mkdir échoue si le dossier existe déjà, ce qui le réserve sans course entre deux lancements."""
+    os.makedirs(sortie, exist_ok=True)
     base = os.path.join(sortie, datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
-    dossier, n = base, 1
-    while os.path.exists(dossier):
-        n += 1
-        dossier = f"{base}-{n}"
-    return dossier
+    n = 1
+    while True:
+        dossier = base if n == 1 else f"{base}-{n}"
+        try:
+            os.mkdir(dossier)
+            return dossier
+        except FileExistsError:
+            n += 1
 
 
 def faire_le_menage(ctx, outils, sortie):
