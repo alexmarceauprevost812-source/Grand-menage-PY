@@ -32,7 +32,7 @@ Elle propose d'installer ce qui manque, avec les bonnes commandes pour ton syst�
     Kali     : sudo apt install pipx sherlock maigret && pipx install holehe && pipx ensurepath
     Windows  : py -m pip install --user holehe sherlock-project maigret
 
-Utilisation (sous Windows : remplace python3 par py -3, ou double-clique sur grand-menage.bat) :
+Utilisation (sous Windows : remplace python3 par py -3, ou tape grand-menage dans le terminal) :
     python3 grand-menage.py                          ouvre le menu
     python3 grand-menage.py ton.adresse@hotmail.com
     python3 grand-menage.py ton.adresse@hotmail.com --pseudo tonpseudo --nom "Ton Nom"
@@ -691,23 +691,31 @@ def choisir_outils(outils):
     return [o for i, o in enumerate(outils) if i in voulus]
 
 
-def dernier_dossier(sortie):
+def dernier_dossier(sortie, contenant=None):
+    """Dossier de résultats le plus récent. Avec `contenant`, seulement un dossier qui a ce fichier
+    (un ménage interrompu peut laisser un dossier sans rapport)."""
     try:
         dossiers = sorted(d for d in os.listdir(sortie)
                           if re.match(r"^\d{8}_\d{4}$", d) and os.path.isdir(os.path.join(sortie, d)))
     except OSError:
         return None
-    return os.path.join(sortie, dossiers[-1]) if dossiers else None
+    for d in reversed(dossiers):
+        if not contenant or os.path.isfile(os.path.join(sortie, d, contenant)):
+            return os.path.join(sortie, d)
+    return None
 
 
 def voir_dernier_resultat(sortie):
-    d = dernier_dossier(sortie)
+    d = dernier_dossier(sortie, "RESULTAT_FINAL.md")
     if not d:
         print("  Aucun résultat pour l'instant. Lance d'abord le grand ménage (option 1).")
         return
     print(f"\n  Dossier : {d}\n")
-    with open(os.path.join(d, "RESULTAT_FINAL.md"), encoding="utf-8") as f:
-        print(f.read())
+    try:
+        with open(os.path.join(d, "RESULTAT_FINAL.md"), encoding="utf-8", errors="replace") as f:
+            print(f.read())
+    except OSError as e:
+        print(f"  Impossible de lire le rapport ({e}).")
 
 
 def ouvrir_chemin(chemin):
