@@ -24,13 +24,14 @@ et les lettres.
 
 À utiliser seulement avec TON adresse courriel.
 
-Fonctionne sur Kali Linux (et les autres Linux) et sur Windows 10/11.
+Fonctionne sur Kali Linux (et les autres Linux), sur Windows 10/11 et sur Android avec Termux.
 
 Installation des outils (une seule fois) : lance le menu et choisis l'option 6.
 Elle propose d'installer ce qui manque, avec les bonnes commandes pour ton système.
 À la main, si tu préfères :
     Kali     : sudo apt install pipx sherlock maigret && pipx install holehe && pipx ensurepath
     Windows  : py -m pip install --user holehe sherlock-project maigret
+    Termux   : pkg install python && pip install holehe sherlock-project maigret
 
 Utilisation (sous Windows : remplace python3 par py -3, ou tape grand-menage dans le terminal) :
     python3 grand-menage.py                          ouvre le menu
@@ -73,8 +74,17 @@ def est_kali():
         return False
 
 
+def est_termux():
+    """Termux : le terminal Linux pour Android (pas de sudo, pip installe dans $PREFIX)."""
+    return "com.termux" in os.environ.get("PREFIX", "") or "TERMUX_VERSION" in os.environ
+
+
 def nom_systeme():
-    return "Windows" if os.name == "nt" else ("Kali Linux" if est_kali() else "Linux")
+    if os.name == "nt":
+        return "Windows"
+    if est_termux():
+        return "Termux (Android)"
+    return "Kali Linux" if est_kali() else "Linux"
 
 
 def completer_path():
@@ -824,6 +834,10 @@ def plan_installation(manquants):
     if os.name == "nt":   # Windows : pip suffit
         for prog in manquants:
             plan.append((prog, [sys.executable, "-m", "pip", "install", "--user", PAQUETS_PIP[prog]], None))
+        return plan
+    if est_termux():      # Termux : pas de sudo ni de pipx, pip installe directement dans Termux
+        for prog in manquants:
+            plan.append((prog, [sys.executable, "-m", "pip", "install", PAQUETS_PIP[prog]], None))
         return plan
     pipx = ["pipx"]
     if not shutil.which("pipx"):
